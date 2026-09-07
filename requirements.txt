@@ -1,0 +1,3 @@
+faster-whisper
+tkinterdnd2
+pyinstaller
