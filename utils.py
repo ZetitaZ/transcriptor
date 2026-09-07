@@ -1,6 +1,15 @@
+import os
 import re
+import sys
 import unicodedata
 from pathlib import Path
+
+
+def obtener_ruta_raiz():
+    """Devuelve siempre la carpeta donde estas el .exe o el .py, NUNCA _internal."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.abspath(os.path.dirname(__file__))
 
 
 class Tiempo:
@@ -23,7 +32,6 @@ def sanitizar_nombre(texto_original: str) -> str:
 
 
 def acortar_ruta(ruta, max_len=45):
-    """Acorta la ruta para que no rompa la interfaz si es muy larga."""
     if len(ruta) <= max_len:
         return ruta
     partes = Path(ruta).parts
@@ -40,7 +48,6 @@ class InterceptorTerminal:
     def write(self, texto):
         if self.chequeo_aborto():
             raise InterruptedError("Descarga cancelada por el usuario.")
-
         limpio = texto.replace("\r", "").strip()
         if limpio and ("%" in limpio or "MB/s" in limpio or "it/s" in limpio):
             self.log_func(f"Descargando: {limpio.split()[-1]}")

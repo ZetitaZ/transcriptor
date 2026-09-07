@@ -1,22 +1,24 @@
+import ctypes
+import datetime
 import os
 import threading
-from pathlib import Path
-import ctypes
-
 import tkinter as tk
+from pathlib import Path
 from tkinter import filedialog, messagebox
 from tkinter.ttk import Progressbar, Spinbox
-from tkinterdnd2 import TkinterDnD, DND_FILES
 
-from utils import sanitizar_nombre, acortar_ruta
+from tkinterdnd2 import DND_FILES, TkinterDnD
+
 from motor_ia import MotorTranscriptor
+from utils import acortar_ruta, obtener_ruta_raiz, sanitizar_nombre
 
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 
+# Detectar sistema operativo. Windows 8.1 o superior
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(1)
-except Exception:
+except (AttributeError, OSError):
     pass
 
 
@@ -46,19 +48,37 @@ class TranscriptorApp:
         self.fuente_subtitulos = ("Segoe UI", 11, "bold")
         self.fuente_proceso = ("Segoe UI", 10, "bold")
 
-        # Callbacks para conectar la UI con el Motor IA
         self.callbacks_motor = {
             "estado": lambda msg: self.actualizar_estado(msg),
             "preview": lambda msg: self.log_preview(msg),
             "progreso": lambda msg: self.log_progreso_descarga(msg),
             "fin": lambda estado, txt: self.terminar_interfaz(estado, txt),
-            "error": lambda err: self.root.after(
-                0, lambda: messagebox.showerror("Error", err)
-            ),
+            "error": lambda err: self.registrar_error(err),
             "check_abort": lambda: self.abortar,
         }
 
         self.construir_interfaz()
+        self.root.report_callback_exception = self.manejar_error_tk
+
+    def registrar_error(self, err):
+        self.root.after(0, lambda: messagebox.showerror("Error Critico", err))
+
+        try:
+            ruta_log = os.path.join(obtener_ruta_raiz(), "error_log.txt")
+            with open(ruta_log, "a", encoding="utf-8") as f:
+                fecha = datetime.datetime.now(datetime.timezone.utc).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+                f.write(f"[{fecha} UTC] ERROR REGISTRADO:\n{err}\n{'-' * 50}\n")
+        except OSError:
+            # Atrapamos exclusivamente errores de sistema (disco lleno, sin permisos, etc.)
+            pass
+
+    def manejar_error_tk(self, exc_type, exc_value, exc_traceback):
+        import traceback
+        tb = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+        error_completo = f"Error en la interfaz grafica:\n{exc_value}\n\n--- DETALLE TECNICO ---\n{tb}"
+        self.registrar_error(error_completo)
 
     def construir_interfaz(self):
         self.lbl_titulo = tk.Label(
@@ -70,7 +90,6 @@ class TranscriptorApp:
         )
         self.lbl_titulo.pack(pady=(20, 10))
 
-        # --- PASO 1 ---
         self.frame_paso1 = tk.Frame(self.root, bg="#ffffff", bd=1, relief="solid")
         self.frame_paso1.pack(fill=tk.X, padx=30, pady=10)
         tk.Label(
@@ -118,7 +137,6 @@ class TranscriptorApp:
         )
         self.btn_destino.pack(side=tk.RIGHT)
 
-        # --- PASO 2 ---
         self.frame_paso2 = tk.Frame(self.root, bg="#ffffff", bd=1, relief="solid")
         tk.Label(
             self.frame_paso2,
@@ -133,7 +151,7 @@ class TranscriptorApp:
         self.btn_small = tk.Button(
             self.frame_botones,
             text="Modelo Rapido\n(Velocidad)",
-            command=lambda: self.iniciar_hilo("small"),
+            command=lambda: self.preparar_hilo("small"),
             font=("Segoe UI", 10, "bold"),
             bg="#2ecc71",
             fg="white",
@@ -146,7 +164,7 @@ class TranscriptorApp:
         self.btn_medium = tk.Button(
             self.frame_botones,
             text="Modelo Preciso\n(Calidad)",
-            command=lambda: self.iniciar_hilo("medium"),
+            command=lambda: self.preparar_hilo("medium"),
             font=("Segoe UI", 10, "bold"),
             bg="#3498db",
             fg="white",
@@ -191,7 +209,6 @@ class TranscriptorApp:
         )
         self.spin_hilos.pack(pady=(0, 10))
 
-        # --- PASO 3 ---
         self.frame_paso3 = tk.Frame(self.root, bg="#f5f7fa")
         self.lbl_estado = tk.Label(
             self.frame_paso3,
@@ -258,7 +275,6 @@ class TranscriptorApp:
             cursor="hand2",
         )
 
-    # --- Logica de UI ---
     def toggle_avanzadas(self):
         if self.frame_avanzadas.winfo_ismapped():
             self.frame_avanzadas.pack_forget()
@@ -349,6 +365,27 @@ class TranscriptorApp:
         self.btn_cancelar.config(state=tk.DISABLED, text="Deteniendo...")
         self.actualizar_estado("Cancelando operacion...", color="#e74c3c")
 
+    def preparar_hilo(self, modelo_elegido):
+        # Validar si el modelo existe antes de bloquear la UI
+        ruta_base = obtener_ruta_raiz()
+        nombre_carpeta = "fw_small" if modelo_elegido == "small" else "fw_medium"
+        ruta_modelo = os.path.join(ruta_base, "models", nombre_carpeta)
+
+        if not (
+            os.path.exists(os.path.join(ruta_modelo, "model.bin"))
+            or os.path.exists(os.path.join(ruta_modelo, "model.safetensors"))
+        ):
+            peso_msg = "aprox. 400 MB" if modelo_elegido == "small" else "aprox. 1.5 GB"
+            nombre_modelo = "Rapido" if modelo_elegido == "small" else "Preciso"
+            respuesta = messagebox.askyesno(
+                "Descargar Modelo",
+                f"El modelo {nombre_modelo} pesa {peso_msg}.\nEsta descarga se realiza solo la primera vez.\n¿Deseas descargarlo ahora?",
+            )
+            if not respuesta:
+                return
+
+        self.iniciar_hilo(modelo_elegido)
+
     def iniciar_hilo(self, modelo_elegido):
         self.abortar = False
         self.btn_small.config(state=tk.DISABLED, bg="#95a5a6")
@@ -369,12 +406,10 @@ class TranscriptorApp:
         self.actualizar_estado("Iniciando motor de transcripcion...")
         self.barra_progreso.start(15)
 
-        # Usamos el Motor Externo
         nombre_base = sanitizar_nombre(Path(self.ruta_archivo).stem)
         hilos = self.var_hilos.get()
         motor = MotorTranscriptor(self.callbacks_motor)
 
-        # Corremos el motor en un hilo separado
         hilo = threading.Thread(
             target=motor.procesar,
             args=(
@@ -407,13 +442,19 @@ class TranscriptorApp:
                     font=("Segoe UI", 12, "bold"),
                 )
                 self.btn_abrir.pack(side=tk.TOP, pady=10)
-            elif estado_final == "descargado":
-                self.barra_progreso.pack_forget()
+
+            elif estado_final == "descarga_completada":
                 self.lbl_estado.config(
-                    text="Modelo descargado correctamente",
-                    fg="#27ae60",
-                    font=("Segoe UI", 12, "bold"),
+                    text="Descarga lista. Haz clic en el modelo para transcribir.",
+                    fg="#2980b9",
+                    font=("Segoe UI", 11, "bold"),
                 )
+                self.barra_progreso.pack_forget()
+                messagebox.showinfo(
+                    "Descarga Exitosa",
+                    "El modelo de IA se descargo correctamente.\n\nSelecciona el modelo deseado para iniciar a transcribir.",
+                )
+
             elif estado_final == "cancelado":
                 self.lbl_estado.config(
                     text="Operacion cancelada por el usuario",
