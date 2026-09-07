@@ -1,3 +1,9 @@
 models/
 venv/
 transcripciones/
+build/
+dist/
+
+error_log.txt
+interfaz.py
+main.spec

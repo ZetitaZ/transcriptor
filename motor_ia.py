@@ -1,21 +1,16 @@
+import gc
 import os
 import sys
-import gc
-from pathlib import Path
-from utils import Tiempo, InterceptorTerminal
+import traceback
+
+from huggingface_hub.utils import HfHubHTTPError
+from requests.exceptions import RequestException
+
+from utils import InterceptorTerminal, Tiempo, obtener_ruta_raiz
 
 
 class MotorTranscriptor:
     def __init__(self, callbacks):
-        """
-        callbacks es un diccionario con funciones de la interfaz para actualizar visualmente:
-        'estado': actualiza el label principal
-        'preview': añade texto a la consola
-        'progreso': actualiza la barra de descarga
-        'fin': avisa cuando termina todo
-        'error': lanza una ventana de error
-        'check_abort': devuelve True si el usuario canceló
-        """
         self.cb = callbacks
 
     def procesar(self, ruta_archivo, carpeta_final, nombre_base, modelo_elegido, hilos):
@@ -24,20 +19,28 @@ class MotorTranscriptor:
             ruta_final = os.path.join(carpeta_final, nombre_base)
             os.makedirs(ruta_final, exist_ok=True)
 
-            ruta_modelo = (
-                "./models/fw_small"
-                if modelo_elegido == "small"
-                else "./models/fw_medium"
-            )
+            ruta_base = obtener_ruta_raiz()
+            nombre_carpeta = "fw_small" if modelo_elegido == "small" else "fw_medium"
+            ruta_modelo = os.path.join(ruta_base, "models", nombre_carpeta)
 
-            # --- Lógica de Descarga ---
-            if modelo_elegido == "medium" and not (
+            repo_id = (
+                "Systran/faster-whisper-small"
+                if modelo_elegido == "small"
+                else "Systran/faster-whisper-medium"
+            )
+            peso_msg = "aprox. 400 MB" if modelo_elegido == "small" else "aprox. 1.5 GB"
+            nombre_modelo = "Rapido" if modelo_elegido == "small" else "Preciso"
+
+            # Evita que luego de descargar la transcripcion inicie automaticamente
+            descarga_realizada = False
+
+            if not (
                 os.path.exists(os.path.join(ruta_modelo, "model.bin"))
                 or os.path.exists(os.path.join(ruta_modelo, "model.safetensors"))
             ):
-                self.cb["estado"]("Preparando descarga del modelo...")
+                self.cb["estado"](f"Preparando descarga del modelo {nombre_modelo}...")
                 self.cb["preview"](
-                    "Iniciando descarga del modelo de alta precision (aprox 1.5 GB)..."
+                    f"Iniciando descarga ({peso_msg}). Esto se hace solo una vez..."
                 )
 
                 from huggingface_hub import snapshot_download
@@ -45,30 +48,38 @@ class MotorTranscriptor:
                 sys.stderr = InterceptorTerminal(
                     self.cb["progreso"], self.cb["check_abort"]
                 )
+
                 try:
-                    snapshot_download(
-                        repo_id="Systran/faster-whisper-medium", local_dir=ruta_modelo
-                    )
+                    snapshot_download(repo_id=repo_id, local_dir=ruta_modelo)
                     self.cb["preview"](
-                        "\nDescarga completada con exito. Ahora puede usar el 'Modelo Preciso'."
+                        f"\nDescarga completada con exito. Listo para usar el modelo {nombre_modelo}."
                     )
-                    self.cb["fin"]("descargado", None)
+                    descarga_realizada = True
                 except InterruptedError:
                     self.cb["fin"]("cancelado", None)
-                except Exception as e:
-                    self.cb["error"](f"Error de Descarga: {str(e)}")
+                    return
+                except (RequestException, HfHubHTTPError) as e:
+                    self.cb["error"](
+                        f"Error de red al descargar. Verifica tu conexion: {e!s}"
+                    )
                     self.cb["fin"]("error", None)
+                    return
+                except OSError as e:
+                    self.cb["error"](f"Error de almacenamiento: {e!s}")
+                    self.cb["fin"]("error", None)
+                    return
                 finally:
                     sys.stderr = original_stderr
-                return
 
             if self.cb["check_abort"]():
                 self.cb["fin"]("cancelado", None)
                 return
 
-            self.cb["estado"]("Cargando modelo en memoria...")
+            if descarga_realizada:
+                self.cb["fin"]("descarga_completada", None)
+                return
 
-            # Importamos Whisper solo si es necesario usarlo
+            self.cb["estado"]("Cargando modelo en memoria...")
             from faster_whisper import WhisperModel
 
             model = WhisperModel(
@@ -99,20 +110,31 @@ class MotorTranscriptor:
             else:
                 self.cb["fin"]("cancelado", None)
 
-        except Exception as e:
+        except (RuntimeError, MemoryError) as e:
             sys.stderr = original_stderr
             error_str = str(e)
-
             if (
                 "mkl_malloc" in error_str.lower()
                 or "memory" in error_str.lower()
                 or "allocate" in error_str.lower()
             ):
-                msj = "Error: Memoria RAM insuficiente.\nCierra otros programas o reduce la cantidad de hilos."
+                msj = "Error: Memoria RAM insuficiente.\nCierra otros programas o reduce hilos."
             else:
-                msj = f"Ocurrio un problema inesperado:\n{error_str}"
-
+                msj = f"Error en el motor de IA:\n{error_str}"
             self.cb["error"](msj)
+            self.cb["fin"]("error", None)
+
+        except OSError as e:
+            sys.stderr = original_stderr
+            self.cb["error"](f"Error al leer/escribir archivos: {e!s}")
+            self.cb["fin"]("error", None)
+
+        except Exception as e:  # noqa: BLE001
+            sys.stderr = original_stderr
+
+            # Formatear el error para enviarlo al log de la interfaz
+            error_detallado = f"Excepcion no controlada: {e!s}\n\nTraceback:\n{traceback.format_exc()}"
+            self.cb["error"](error_detallado)
             self.cb["fin"]("error", None)
 
         finally:
